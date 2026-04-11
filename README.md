@@ -2,23 +2,19 @@
 
 基于 Node.js 的命令行工具，用 `fzf` 快速检索 opencode 本地 prompt 历史，并打印或复制选中的 prompt。
 
-默认会优先从 OpenCode SQLite 数据库读取更完整的历史（包括分段存储在 parts 里的文本），如果不可用则自动回退到历史文件。
+## Quickstart
 
-## 依赖
+### 依赖
 
 - Node.js 18+
 - `fzf`
 - macOS 下复制到剪贴板需要 `pbcopy`
 
-## 安装依赖
-
-项目没有运行时依赖，生成 lockfile 或安装本地包元数据即可：
+本地安装：
 
 ```bash
 npm install
 ```
-
-## 运行
 
 直接执行：
 
@@ -39,6 +35,21 @@ opencode-prompt-finder
 opencode-prompt-finder [--source <auto|db|history>] [--agents <list>] [--db-path <file>] [--path <file>] [--limit <n>] [--print]
 ```
 
+### 示例
+
+打印最近 100 条里筛选到的 prompt：
+
+```bash
+node bin/opencode-prompt-finder.js --limit 100 --print
+```
+
+自定义 agent 过滤规则：
+
+```bash
+node bin/opencode-prompt-finder.js --source db --agents orchestrator,plan,build --print
+```
+
+
 ### 参数
 
 - `--source <auto|db|history>`：数据源，默认 `auto`
@@ -57,34 +68,3 @@ opencode-prompt-finder [--source <auto|db|history>] [--agents <list>] [--db-path
 - 逐条消息按稳定顺序拼接其 `part` 中的文本片段
 - 只保留文本相关 part，忽略 image/file part
 
-### 示例
-
-打印最近 100 条里筛选到的 prompt：
-
-```bash
-node bin/opencode-prompt-finder.js --limit 100 --print
-```
-
-强制从 SQLite DB 读取：
-
-```bash
-node bin/opencode-prompt-finder.js --source db --db-path ~/.local/share/opencode/opencode.db --print
-```
-
-自定义保留的 agent：
-
-```bash
-node bin/opencode-prompt-finder.js --source db --agents orchestrator,plan,build --print
-```
-
-指定 history 文件（不走 DB）：
-
-```bash
-node bin/opencode-prompt-finder.js --source history --path ~/.local/state/opencode/prompt-history.jsonl
-```
-
-## 测试
-
-```bash
-npm test
-```
