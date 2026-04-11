@@ -1,0 +1,13 @@
+{
+  "name": "opencode-prompt-finder",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Find and copy opencode prompt history via fzf",
+  "main": "opencode_prompt_finder.js",
+  "bin": {
+    "opencode-prompt-finder": "bin/opencode-prompt-finder.js"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}
