@@ -6,14 +6,59 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const DEFAULT_HISTORY_PATH = '~/.local/state/opencode/prompt-history.jsonl';
+const DEFAULT_DB_PATH = '~/.local/share/opencode/opencode.db';
+const DEFAULT_TOP_LEVEL_AGENTS = ['orchestrator', 'plan', 'build'];
 const USAGE = [
-  'Usage: opencode-prompt-finder [--path <file>] [--limit <n>] [--print]',
+  'Usage: opencode-prompt-finder [--source <auto|db|history>] [--agents <list>] [--db-path <file>] [--path <file>] [--limit <n>] [--print]',
   '',
-  'Find and copy opencode prompt history via fzf',
+  'Find and copy opencode prompt history via fzf.',
+  'Default source is auto: try SQLite DB first, then fallback to history file.',
 ].join('\n');
 
-function resolveHistoryPath(pathArg) {
-  const raw = pathArg || DEFAULT_HISTORY_PATH;
+function parseAgents(value) {
+  const agents = String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!agents.length) {
+    throw new Error('Invalid value for --agents');
+  }
+  return [...new Set(agents)];
+}
+
+function buildSqlitePromptsSql(limit = null, agents = DEFAULT_TOP_LEVEL_AGENTS) {
+  const hasLimit = Number.isInteger(limit) && limit > 0;
+  const limitClause = hasLimit ? `LIMIT ${limit}` : '';
+  const agentList = agents.map((agent) => `'${agent.replace(/'/g, "''")}'`).join(', ');
+  return [
+    'WITH recent_messages AS (',
+    '  SELECT',
+    '    m.id,',
+    "    json_extract(m.data, '$.role') AS role,",
+    "    json_extract(m.data, '$.agent') AS agent,",
+    '    m.time_created AS message_created_at',
+    '  FROM message m',
+    `  WHERE json_extract(m.data, '$.role') = 'user' AND json_extract(m.data, '$.agent') IN (${agentList})`,
+    '  ORDER BY m.time_created DESC, m.id DESC',
+    hasLimit ? `  ${limitClause}` : '',
+    ')',
+    'SELECT',
+    '  rm.id AS message_id,',
+    '  rm.role AS role,',
+    '  rm.agent AS agent,',
+    '  rm.message_created_at AS message_created_at,',
+    '  p.id AS part_id,',
+    '  p.time_created AS part_created_at,',
+    "  json_extract(p.data, '$.type') AS part_type,",
+    "  json_extract(p.data, '$.text') AS part_text",
+    'FROM recent_messages rm',
+    'LEFT JOIN part p ON p.message_id = rm.id',
+    'ORDER BY rm.message_created_at, rm.id, p.time_created, p.id;',
+  ].filter(Boolean).join(' ');
+}
+
+function resolvePathWithHome(pathArg, fallbackPath) {
+  const raw = pathArg || fallbackPath;
   if (!raw.startsWith('~')) {
     return path.resolve(raw);
   }
@@ -26,6 +71,14 @@ function resolveHistoryPath(pathArg) {
     return path.join(home, raw.slice(2));
   }
   return path.resolve(raw);
+}
+
+function resolveHistoryPath(pathArg) {
+  return resolvePathWithHome(pathArg, DEFAULT_HISTORY_PATH);
+}
+
+function resolveDbPath(pathArg) {
+  return resolvePathWithHome(pathArg, DEFAULT_DB_PATH);
 }
 
 function sanitizePreview(text) {
@@ -66,6 +119,81 @@ function loadPrompts(historyPath, limit = null) {
     return [];
   }
   return prompts.slice(-limit);
+}
+
+function isTextPart(row) {
+  const text = row && row.part_text;
+  if (typeof text !== 'string' || !text.trim()) {
+    return false;
+  }
+
+  const partType = typeof row.part_type === 'string' ? row.part_type.toLowerCase() : '';
+  if (partType.includes('image') || partType.includes('file')) {
+    return false;
+  }
+  if (!partType) {
+    return true;
+  }
+  return partType.includes('text');
+}
+
+function parseDbRowsToPrompts(rows, limit = null, agents = DEFAULT_TOP_LEVEL_AGENTS) {
+  const grouped = new Map();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') {
+      continue;
+    }
+    if (row.role !== 'user' || !agents.includes(row.agent)) {
+      continue;
+    }
+    if (!isTextPart(row)) {
+      continue;
+    }
+    const key = String(row.message_id);
+    const existing = grouped.get(key) || [];
+    existing.push(row.part_text);
+    grouped.set(key, existing);
+  }
+
+  const prompts = Array.from(grouped.values())
+    .map((parts) => parts.join(''))
+    .filter((value) => typeof value === 'string' && value.trim());
+
+  if (limit === null || limit === undefined) {
+    return prompts;
+  }
+  if (limit <= 0) {
+    return [];
+  }
+  return prompts.slice(-limit);
+}
+
+function loadPromptsFromDb(dbPath, limit = null, deps = {}, agents = DEFAULT_TOP_LEVEL_AGENTS) {
+  const run = deps.spawnSync || spawnSync;
+  const proc = run('sqlite3', ['-json', dbPath, buildSqlitePromptsSql(limit, agents)], {
+    encoding: 'utf8',
+    maxBuffer: 50 * 1024 * 1024,
+  });
+  if (proc.error && proc.error.code === 'ENOENT') {
+    const err = new Error('sqlite3 is not installed or not in PATH.');
+    err.code = 'ENOENT';
+    throw err;
+  }
+  if (proc.status !== 0) {
+    const stderr = (proc.stderr || '').toString().trim();
+    throw new Error(`Failed to query SQLite DB (exit code ${proc.status}): ${stderr}`);
+  }
+
+  let rows;
+  try {
+    rows = JSON.parse((proc.stdout || '').toString() || '[]');
+  } catch {
+    throw new Error('Failed to parse SQLite query output.');
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error('Unexpected SQLite query output format.');
+  }
+  return parseDbRowsToPrompts(rows, limit, agents);
 }
 
 function buildFzfItems(prompts, limit) {
@@ -141,6 +269,9 @@ function copyToClipboard(text, deps = {}) {
 function parseArgs(argv) {
   const args = {
     path: DEFAULT_HISTORY_PATH,
+    dbPath: DEFAULT_DB_PATH,
+    source: 'auto',
+    agents: [...DEFAULT_TOP_LEVEL_AGENTS],
     printMode: false,
     limit: 200,
     help: false,
@@ -163,6 +294,15 @@ function parseArgs(argv) {
     } else if (arg === '--path') {
       args.path = requireValue(arg, i);
       i += 1;
+    } else if (arg === '--db-path') {
+      args.dbPath = requireValue(arg, i);
+      i += 1;
+    } else if (arg === '--agents') {
+      args.agents = parseAgents(requireValue(arg, i));
+      i += 1;
+    } else if (arg === '--source') {
+      args.source = requireValue(arg, i);
+      i += 1;
     } else if (arg === '--limit') {
       args.limit = Number.parseInt(requireValue(arg, i), 10);
       i += 1;
@@ -174,6 +314,9 @@ function parseArgs(argv) {
   if (!Number.isInteger(args.limit)) {
     throw new Error('Invalid value for --limit');
   }
+  if (!['auto', 'db', 'history'].includes(args.source)) {
+    throw new Error('Invalid value for --source (expected auto, db, or history)');
+  }
 
   return args;
 }
@@ -183,6 +326,7 @@ function main(argv = process.argv.slice(2), deps = {}) {
   const stdout = deps.stdout || process.stdout;
   const existsSync = deps.existsSync || fs.existsSync;
   const loadPromptsFn = deps.loadPrompts || loadPrompts;
+  const loadPromptsFromDbFn = deps.loadPromptsFromDb || loadPromptsFromDb;
   const runFzfFn = deps.runFzf || runFzf;
   const copyToClipboardFn = deps.copyToClipboard || copyToClipboard;
 
@@ -200,12 +344,43 @@ function main(argv = process.argv.slice(2), deps = {}) {
   }
 
   const historyPath = resolveHistoryPath(args.path);
-  if (!existsSync(historyPath)) {
-    stderr.write(`History file not found: ${historyPath}\n`);
-    return 1;
+  const dbPath = resolveDbPath(args.dbPath);
+
+  let prompts = [];
+  if (args.source === 'history') {
+    if (!existsSync(historyPath)) {
+      stderr.write(`History file not found: ${historyPath}\n`);
+      return 1;
+    }
+    prompts = loadPromptsFn(historyPath, args.limit);
+  } else if (args.source === 'db') {
+    if (!existsSync(dbPath)) {
+      stderr.write(`SQLite DB not found: ${dbPath}\n`);
+      return 1;
+    }
+    try {
+      prompts = loadPromptsFromDbFn(dbPath, args.limit, deps, args.agents);
+    } catch (err) {
+      stderr.write(`${err.message}\n`);
+      return 1;
+    }
+  } else {
+    if (existsSync(dbPath)) {
+      try {
+        prompts = loadPromptsFromDbFn(dbPath, args.limit, deps, args.agents);
+      } catch {
+        prompts = [];
+      }
+    }
+    if (!prompts.length) {
+      if (!existsSync(historyPath)) {
+        stderr.write(`No prompt source found. Tried DB: ${dbPath}, history: ${historyPath}\n`);
+        return 1;
+      }
+      prompts = loadPromptsFn(historyPath, args.limit);
+    }
   }
 
-  const prompts = loadPromptsFn(historyPath, args.limit);
   const items = buildFzfItems(prompts, args.limit);
   if (!items.length) {
     stderr.write('No valid prompt history found.\n');
@@ -241,10 +416,19 @@ function main(argv = process.argv.slice(2), deps = {}) {
 
 module.exports = {
   DEFAULT_HISTORY_PATH,
+  DEFAULT_DB_PATH,
+  DEFAULT_TOP_LEVEL_AGENTS,
+  parseAgents,
+  buildSqlitePromptsSql,
+  resolvePathWithHome,
   resolveHistoryPath,
+  resolveDbPath,
   sanitizePreview,
   parseHistoryLines,
   loadPrompts,
+  isTextPart,
+  parseDbRowsToPrompts,
+  loadPromptsFromDb,
   buildFzfItems,
   buildFzfInput,
   parseSelectedItemId,

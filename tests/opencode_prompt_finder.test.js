@@ -51,6 +51,90 @@ test('resolveHistoryPath expands home', () => {
   }
 });
 
+test('resolveDbPath expands home', () => {
+  const prevHome = process.env.HOME;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opf-home-db-'));
+  process.env.HOME = tmp;
+  try {
+    const out = finder.resolveDbPath('~/.local/share/opencode/opencode.db');
+    assert.equal(out, path.join(tmp, '.local/share/opencode/opencode.db'));
+  } finally {
+    process.env.HOME = prevHome;
+  }
+});
+
+test('parseAgents parses comma-separated agent list', () => {
+  assert.deepEqual(finder.parseAgents('orchestrator, plan,build,plan'), ['orchestrator', 'plan', 'build']);
+});
+
+test('parseAgents rejects empty agent list', () => {
+  assert.throws(() => finder.parseAgents(' , '), /Invalid value for --agents/);
+});
+
+test('parseDbRowsToPrompts keeps top-level user text parts only', () => {
+  const rows = [
+    { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'Hello ' },
+    { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'world' },
+    { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'image', part_text: 'ignore image' },
+    { message_id: '2', role: 'user', agent: 'worker', part_type: 'text', part_text: 'delegated' },
+    { message_id: '3', role: 'user', agent: 'orchestrator', part_type: 'file', part_text: 'ignore file' },
+    { message_id: '4', role: 'assistant', agent: 'orchestrator', part_type: 'text', part_text: 'assistant text' },
+    { message_id: '5', role: 'user', agent: 'orchestrator', part_type: 'input_text', part_text: 'pasted' },
+    { message_id: '6', role: 'user', agent: 'build', part_type: 'text', part_text: 'build prompt' },
+    { message_id: '7', role: 'user', agent: 'plan', part_type: 'text', part_text: 'plan prompt' },
+  ];
+
+  assert.deepEqual(finder.parseDbRowsToPrompts(rows), ['Hello world', 'pasted', 'build prompt', 'plan prompt']);
+});
+
+test('loadPromptsFromDb parses sqlite3 json output', () => {
+  const rows = [
+    { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'a' },
+    { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'b' },
+    { message_id: '2', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'c' },
+  ];
+
+  const prompts = finder.loadPromptsFromDb('/tmp/does-not-matter.db', 1, {
+    spawnSync: () => ({ status: 0, stdout: JSON.stringify(rows), stderr: '' }),
+  });
+
+  assert.deepEqual(prompts, ['c']);
+});
+
+test('loadPromptsFromDb passes agent list into SQL and filtering', () => {
+  let capturedSql = '';
+  const rows = [
+    { message_id: '1', role: 'user', agent: 'plan', part_type: 'text', part_text: 'plan only' },
+    { message_id: '2', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'skip orchestrator' },
+  ];
+
+  const prompts = finder.loadPromptsFromDb('/tmp/does-not-matter.db', null, {
+    spawnSync: (_cmd, args) => {
+      capturedSql = args[2];
+      return { status: 0, stdout: JSON.stringify(rows), stderr: '' };
+    },
+  }, ['plan']);
+
+  assert.match(capturedSql, /IN \('plan'\)/);
+  assert.deepEqual(prompts, ['plan only']);
+});
+
+test('parseArgs accepts source and db-path', () => {
+  const args = finder.parseArgs(['--source', 'db', '--db-path', '/tmp/opencode.db', '--limit', '20']);
+  assert.equal(args.source, 'db');
+  assert.equal(args.dbPath, '/tmp/opencode.db');
+  assert.equal(args.limit, 20);
+});
+
+test('parseArgs accepts agents', () => {
+  const args = finder.parseArgs(['--agents', 'orchestrator,plan,build']);
+  assert.deepEqual(args.agents, ['orchestrator', 'plan', 'build']);
+});
+
+test('parseArgs rejects invalid source', () => {
+  assert.throws(() => finder.parseArgs(['--source', 'weird']), /Invalid value for --source/);
+});
+
 test('parseSelectedItemId', () => {
   assert.equal(finder.parseSelectedItemId('12\tpreview text'), 12);
 });
@@ -157,5 +241,40 @@ test('main print mode with tempfile', () => {
 
   assert.equal(code, 0);
   assert.equal(out.trim(), 'second');
+  assert.equal(err, '');
+});
+
+test('main db mode prints selected prompt', () => {
+  let out = '';
+  let err = '';
+  const code = finder.main(['--source', 'db', '--db-path', '/tmp/opencode.db', '--print'], {
+    existsSync: (p) => p === '/tmp/opencode.db',
+    loadPromptsFromDb: () => ['from db'],
+    runFzf: () => 'from db',
+    stdout: { write: (s) => { out += s; } },
+    stderr: { write: (s) => { err += s; } },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(out.trim(), 'from db');
+  assert.equal(err, '');
+});
+
+test('main auto mode falls back to history when db is unavailable', () => {
+  let out = '';
+  let err = '';
+  const code = finder.main(['--source', 'auto', '--print'], {
+    existsSync: (p) => p.endsWith('prompt-history.jsonl'),
+    loadPromptsFromDb: () => {
+      throw new Error('db query failed');
+    },
+    loadPrompts: () => ['from history'],
+    runFzf: () => 'from history',
+    stdout: { write: (s) => { out += s; } },
+    stderr: { write: (s) => { err += s; } },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(out.trim(), 'from history');
   assert.equal(err, '');
 });
