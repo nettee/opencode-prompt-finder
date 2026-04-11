@@ -1,0 +1,14 @@
+node_modules/
+
+# caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# local tooling
+.cursor/
+.opencode/
+
+# local planning/docs not kept in repo
+specs/
