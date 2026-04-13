@@ -50,7 +50,8 @@ function buildSqlitePromptsSql(limit = null, agents = DEFAULT_TOP_LEVEL_AGENTS) 
     '  p.id AS part_id,',
     '  p.time_created AS part_created_at,',
     "  json_extract(p.data, '$.type') AS part_type,",
-    "  json_extract(p.data, '$.text') AS part_text",
+    "  json_extract(p.data, '$.text') AS part_text,",
+    "  json_extract(p.data, '$.synthetic') AS part_synthetic",
     'FROM recent_messages rm',
     'LEFT JOIN part p ON p.message_id = rm.id',
     'ORDER BY rm.message_created_at, rm.id, p.time_created, p.id;',
@@ -122,6 +123,11 @@ function loadPrompts(historyPath, limit = null) {
 }
 
 function isTextPart(row) {
+  const isSynthetic = row && (row.part_synthetic === true || row.part_synthetic === 1 || row.part_synthetic === 'true');
+  if (isSynthetic) {
+    return false;
+  }
+
   const text = row && row.part_text;
   if (typeof text !== 'string' || !text.trim()) {
     return false;

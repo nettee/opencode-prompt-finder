@@ -75,16 +75,19 @@ test('parseDbRowsToPrompts keeps top-level user text parts only', () => {
   const rows = [
     { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'Hello ' },
     { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'world' },
+    { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'synthetic', part_synthetic: true },
     { message_id: '1', role: 'user', agent: 'orchestrator', part_type: 'image', part_text: 'ignore image' },
     { message_id: '2', role: 'user', agent: 'worker', part_type: 'text', part_text: 'delegated' },
     { message_id: '3', role: 'user', agent: 'orchestrator', part_type: 'file', part_text: 'ignore file' },
     { message_id: '4', role: 'assistant', agent: 'orchestrator', part_type: 'text', part_text: 'assistant text' },
     { message_id: '5', role: 'user', agent: 'orchestrator', part_type: 'input_text', part_text: 'pasted' },
+    { message_id: '8', role: 'user', agent: 'orchestrator', part_type: 'text', part_text: 'normal text', part_synthetic: false },
+    { message_id: '9', role: 'user', agent: 'orchestrator', part_type: 'input_text', part_text: 'normal input', part_synthetic: 0 },
     { message_id: '6', role: 'user', agent: 'build', part_type: 'text', part_text: 'build prompt' },
     { message_id: '7', role: 'user', agent: 'plan', part_type: 'text', part_text: 'plan prompt' },
   ];
 
-  assert.deepEqual(finder.parseDbRowsToPrompts(rows), ['Hello world', 'pasted', 'build prompt', 'plan prompt']);
+  assert.deepEqual(finder.parseDbRowsToPrompts(rows), ['Hello world', 'pasted', 'normal text', 'normal input', 'build prompt', 'plan prompt']);
 });
 
 test('loadPromptsFromDb parses sqlite3 json output', () => {
@@ -116,6 +119,7 @@ test('loadPromptsFromDb passes agent list into SQL and filtering', () => {
   }, ['plan']);
 
   assert.match(capturedSql, /IN \('plan'\)/);
+  assert.match(capturedSql, /\$\.synthetic/);
   assert.deepEqual(prompts, ['plan only']);
 });
 
