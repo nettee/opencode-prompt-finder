@@ -20,6 +20,36 @@ test('parseHistoryLines skips invalid and keeps input', () => {
   assert.deepEqual(finder.parseHistoryLines(lines), ['first', 'second\nline']);
 });
 
+test('parseCodexHistoryLines skips invalid and keeps text', () => {
+  const lines = [
+    '',
+    'not-json',
+    '[]',
+    '{"text": "first"}',
+    '{"text": "   "}',
+    '{"text": 123}',
+    '{"input": "not-codex"}',
+    '{"text": "second\\nline"}',
+  ];
+  assert.deepEqual(finder.parseCodexHistoryLines(lines), ['first', 'second\nline']);
+});
+
+test('parse history/codex entries keep timestamp metadata when present', () => {
+  const historyEntries = finder.parseHistoryEntryLines([
+    '{"input":"h1","ts":1710000000}',
+    '{"input":"h2","created_at":"2026-04-23T10:00:00Z"}',
+  ]);
+  const codexEntries = finder.parseCodexHistoryEntryLines([
+    '{"text":"c1","ts":1710000000123}',
+    '{"text":"c2","timestamp":"2026-04-23T11:00:00Z"}',
+  ]);
+
+  assert.equal(historyEntries[0].ts, 1710000000000);
+  assert.equal(historyEntries[1].ts, Date.parse('2026-04-23T10:00:00Z'));
+  assert.equal(codexEntries[0].ts, 1710000000123);
+  assert.equal(codexEntries[1].ts, Date.parse('2026-04-23T11:00:00Z'));
+});
+
 test('sanitizePreview single line', () => {
   assert.equal(finder.sanitizePreview('a\n\tb   c'), 'a b c');
 });
@@ -58,6 +88,18 @@ test('resolveDbPath expands home', () => {
   try {
     const out = finder.resolveDbPath('~/.local/share/opencode/opencode.db');
     assert.equal(out, path.join(tmp, '.local/share/opencode/opencode.db'));
+  } finally {
+    process.env.HOME = prevHome;
+  }
+});
+
+test('resolveCodexHistoryPath expands home', () => {
+  const prevHome = process.env.HOME;
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'opf-home-codex-'));
+  process.env.HOME = tmp;
+  try {
+    const out = finder.resolveCodexHistoryPath('~/.codex/history.jsonl');
+    assert.equal(out, path.join(tmp, '.codex/history.jsonl'));
   } finally {
     process.env.HOME = prevHome;
   }
@@ -127,6 +169,12 @@ test('parseArgs accepts source and db-path', () => {
   const args = finder.parseArgs(['--source', 'db', '--db-path', '/tmp/opencode.db', '--limit', '20']);
   assert.equal(args.source, 'db');
   assert.equal(args.dbPath, '/tmp/opencode.db');
+  assert.equal(args.limit, 20);
+});
+
+test('parseArgs accepts codex source', () => {
+  const args = finder.parseArgs(['--source', 'codex', '--limit', '20']);
+  assert.equal(args.source, 'codex');
   assert.equal(args.limit, 20);
 });
 
@@ -264,15 +312,16 @@ test('main db mode prints selected prompt', () => {
   assert.equal(err, '');
 });
 
-test('main auto mode falls back to history when db is unavailable', () => {
+test('main auto mode falls back to history on opencode side when db is unavailable', () => {
   let out = '';
   let err = '';
   const code = finder.main(['--source', 'auto', '--print'], {
-    existsSync: (p) => p.endsWith('prompt-history.jsonl'),
+    existsSync: (p) => p.endsWith('prompt-history.jsonl') || p.endsWith('.codex/history.jsonl'),
     loadPromptsFromDb: () => {
       throw new Error('db query failed');
     },
     loadPrompts: () => ['from history'],
+    loadCodexPrompts: () => [],
     runFzf: () => 'from history',
     stdout: { write: (s) => { out += s; } },
     stderr: { write: (s) => { err += s; } },
@@ -281,4 +330,154 @@ test('main auto mode falls back to history when db is unavailable', () => {
   assert.equal(code, 0);
   assert.equal(out.trim(), 'from history');
   assert.equal(err, '');
+});
+
+test('main codex mode prints selected prompt', () => {
+  let out = '';
+  let err = '';
+  const code = finder.main(['--source', 'codex', '--print'], {
+    existsSync: (p) => p.endsWith('.codex/history.jsonl'),
+    loadCodexPrompts: () => ['from codex'],
+    runFzf: () => 'from codex',
+    stdout: { write: (s) => { out += s; } },
+    stderr: { write: (s) => { err += s; } },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(out.trim(), 'from codex');
+  assert.equal(err, '');
+});
+
+test('main auto mode aggregates opencode and codex prompts', () => {
+  let out = '';
+  let err = '';
+  let capturedItems = [];
+  const code = finder.main(['--source', 'auto', '--print'], {
+    existsSync: () => true,
+    loadPromptsFromDb: () => ['from db'],
+    loadCodexPrompts: () => ['from codex'],
+    runFzf: (items) => {
+      capturedItems = items;
+      return 'from codex';
+    },
+    stdout: { write: (s) => { out += s; } },
+    stderr: { write: (s) => { err += s; } },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(out.trim(), 'from codex');
+  assert.equal(err, '');
+  assert.deepEqual(capturedItems.map((item) => item.prompt).sort(), ['from codex', 'from db']);
+});
+
+test('main auto mode globally sorts mixed sources by timestamp (newest first)', () => {
+  let capturedItems = [];
+  const code = finder.main(['--source', 'auto', '--print'], {
+    existsSync: () => true,
+    loadPromptsFromDb: () => [
+      { prompt: 'db old', ts: 1000, source: 'db' },
+      { prompt: 'db new', ts: 3000, source: 'db' },
+    ],
+    loadCodexPrompts: () => [
+      { prompt: 'codex mid', ts: 2000, source: 'codex' },
+    ],
+    runFzf: (items) => {
+      capturedItems = items;
+      return 'db new';
+    },
+    stdout: { write: () => {} },
+    stderr: { write: () => {} },
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(capturedItems.map((item) => item.prompt), ['db new', 'codex mid', 'db old']);
+});
+
+test('single source mode keeps newest first order', () => {
+  let capturedItems = [];
+  const code = finder.main(['--source', 'history', '--print'], {
+    existsSync: (p) => p.endsWith('prompt-history.jsonl'),
+    loadPrompts: () => [
+      { prompt: 'old', ts: 1000 },
+      { prompt: 'new', ts: 2000 },
+    ],
+    runFzf: (items) => {
+      capturedItems = items;
+      return 'new';
+    },
+    stdout: { write: () => {} },
+    stderr: { write: () => {} },
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(capturedItems.map((item) => item.prompt), ['new', 'old']);
+});
+
+test('missing timestamp strategy: timestamped first, missing keep recency order', () => {
+  const items = finder.buildFzfItems([
+    { prompt: 'timed old', ts: 1000 },
+    { prompt: 'untimed old' },
+    { prompt: 'timed new', ts: 2000 },
+    { prompt: 'untimed new' },
+  ], 10);
+
+  assert.deepEqual(items.map((item) => item.prompt), ['timed new', 'timed old', 'untimed new', 'untimed old']);
+});
+
+test('main auto mode skips codex side when unavailable', () => {
+  let out = '';
+  let err = '';
+  const code = finder.main(['--source', 'auto', '--print'], {
+    existsSync: (p) => !p.endsWith('.codex/history.jsonl'),
+    loadPromptsFromDb: () => ['from db'],
+    runFzf: () => 'from db',
+    stdout: { write: (s) => { out += s; } },
+    stderr: { write: (s) => { err += s; } },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(out.trim(), 'from db');
+  assert.equal(err, '');
+});
+
+test('main auto mode skips failed opencode side and uses codex', () => {
+  let out = '';
+  let err = '';
+  const code = finder.main(['--source', 'auto', '--print'], {
+    existsSync: (p) => p.endsWith('.codex/history.jsonl'),
+    loadPromptsFromDb: () => {
+      throw new Error('db query failed');
+    },
+    loadPrompts: () => {
+      throw new Error('history parse failed');
+    },
+    loadCodexPrompts: () => ['from codex'],
+    runFzf: () => 'from codex',
+    stdout: { write: (s) => { out += s; } },
+    stderr: { write: (s) => { err += s; } },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(out.trim(), 'from codex');
+  assert.equal(err, '');
+});
+
+test('main auto mode errors only when both sides are empty/invalid', () => {
+  let err = '';
+  const code = finder.main(['--source', 'auto', '--print'], {
+    existsSync: () => true,
+    loadPromptsFromDb: () => {
+      throw new Error('db broken');
+    },
+    loadPrompts: () => {
+      throw new Error('history broken');
+    },
+    loadCodexPrompts: () => {
+      throw new Error('codex broken');
+    },
+    stderr: { write: (s) => { err += s; } },
+  });
+
+  assert.equal(code, 1);
+  assert.match(err, /No valid prompt history found/);
 });

@@ -10,5 +10,4 @@ __pycache__/
 .cursor/
 .opencode/
 
-# local planning/docs not kept in repo
-specs/
+specs/change/active

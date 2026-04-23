@@ -7,7 +7,7 @@
 ## ✨ 特性
 
 - 🔎 **快速检索 prompt**，基于 `fzf`
-- 🗂️ **多数据源支持**：SQLite DB 或 prompt history 文件
+- 🗂️ **多数据源支持**：OpenCode SQLite DB、OpenCode history、Codex history
 - 🎯 **Agent 过滤**：在 DB 模式下仅保留顶层用户 prompt
 - 📋 **灵活输出**：打印到 stdout 或复制到剪贴板
 
@@ -41,7 +41,7 @@ opencode-prompt-finder
 ## 📖 用法
 
 ```bash
-opencode-prompt-finder [--source <auto|db|history>] [--agents <list>] [--db-path <file>] [--path <file>] [--limit <n>] [--print]
+opencode-prompt-finder [--source <auto|db|history|codex>] [--agents <list>] [--db-path <file>] [--path <file>] [--limit <n>] [--print]
 ```
 
 ### 示例
@@ -60,15 +60,24 @@ node bin/opencode-prompt-finder.js --source db --agents orchestrator,plan,build 
 
 ## ⚙️ 参数
 
-- `--source <auto|db|history>`：数据源，默认 `auto`
-  - `auto`：优先 SQLite DB，失败时回退到 history 文件
+- `--source <auto|db|history|codex>`：数据源，默认 `auto`
+  - `auto`：聚合 OpenCode + Codex 两侧 prompt；OpenCode 侧优先 SQLite DB，不可用或无结果时回退 OpenCode history
+    - 聚合后按时间做全局排序（最新在前），不会按来源分组
+    - 任一侧缺失/解析失败/结果为空时会静默跳过
+    - 仅当两侧都没有有效 prompt 时才报错
   - `db`：仅使用 SQLite DB
-  - `history`：仅使用 history 文件
+  - `history`：仅使用 OpenCode history 文件
+  - `codex`：仅使用 Codex history 文件
 - `--agents <list>`：仅在 SQLite DB 模式下生效，指定要保留的顶层 agent 列表，逗号分隔。默认 `orchestrator,plan,build`
 - `--db-path <file>`：指定 OpenCode SQLite DB 路径，默认 `~/.local/share/opencode/opencode.db`
-- `--path <file>`：指定 prompt 历史文件路径，默认 `~/.local/state/opencode/prompt-history.jsonl`
+- `--path <file>`：指定 OpenCode prompt 历史文件路径，默认 `~/.local/state/opencode/prompt-history.jsonl`
+- Codex history 默认路径：`~/.codex/history.jsonl`
 - `--limit <n>`：只读取最近多少条 prompt，默认 `200`
 - `--print`：将选中内容打印到 stdout，而不是复制到剪贴板
+
+排序说明：
+- 展示顺序始终为“最新在前”。
+- 当缺少时间戳时，该类记录排在有时间戳记录之后，并使用稳定的“最近优先”兜底顺序。
 
 ## 🗄️ SQLite 提取规则
 
